@@ -6,8 +6,9 @@
   "permissions": [
     "core:default",
     "shell:default",
+    "shell:allow-kill",
     {
-      "identifier": "shell:allow-execute",
+      "identifier": "shell:allow-spawn",
       "allow": [
         {
           "name": "claude",

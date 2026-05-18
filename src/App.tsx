@@ -1,65 +1,95 @@
-import { useCallback, useRef, useState } from "react";
-import { motion } from "framer-motion";
-import type { UnlistenFn } from "@tauri-apps/api/event";
-import { spawnClaude, subscribeEvents } from "./bridge/claude";
-import type { ClaudeStreamEvent } from "./bridge/events";
+import { useEffect, useState } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import { useWorkspace } from "./store/workspace";
+import { Canvas } from "./canvas/Canvas";
 import { PromptPill } from "./components/PromptPill";
 import { DebugPanel } from "./components/DebugPanel";
 
 export default function App() {
-  const [events, setEvents] = useState<ClaudeStreamEvent[]>([]);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const unlistenRef = useRef<UnlistenFn | null>(null);
+  const submit = useWorkspace((s) => s.submit);
+  const busy = useWorkspace((s) => s.busy);
+  const events = useWorkspace((s) => s.events);
+  const error = useWorkspace((s) => s.error);
+  const reset = useWorkspace((s) => s.reset);
+  const nodeCount = useWorkspace((s) => s.nodes.length);
+  const sessionId = useWorkspace((s) => s.trunkSessionId);
+  const [showDebug, setShowDebug] = useState(false);
 
-  const handleSubmit = useCallback(async (prompt: string) => {
-    setError(null);
-    setBusy(true);
-    try {
-      const spawnId = await spawnClaude({
-        prompt,
-        fork: false,
-        cwd: "/tmp",
-        allowed_tools: ["Read", "Bash"],
-      });
-      if (unlistenRef.current) {
-        unlistenRef.current();
-        unlistenRef.current = null;
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key.toLowerCase() === "d" && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        setShowDebug((v) => !v);
       }
-      unlistenRef.current = await subscribeEvents(
-        spawnId,
-        (e) => setEvents((prev) => [...prev, e]),
-        () => setBusy(false),
-      );
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-      setBusy(false);
-    }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
   }, []);
+
+  useEffect(() => {
+    return () => reset();
+  }, [reset]);
 
   return (
     <div className="flex h-full w-full bg-canvas text-neutral-900">
-      <main className="relative flex flex-1 flex-col">
-        <div className="flex flex-1 items-center justify-center">
-          <motion.div
-            initial={{ opacity: 0, scale: 0.95 }}
-            animate={{ opacity: 1, scale: 1 }}
-            transition={{ type: "spring", stiffness: 420, damping: 32 }}
-            className="flex flex-col items-center gap-3"
-          >
-            <h1 className="font-sans text-7xl font-semibold tracking-tight text-neutral-900">
-              Canvas
-            </h1>
-            <p className="text-sm text-neutral-400">M1: CLI bridge proof</p>
-          </motion.div>
-        </div>
-        <div className="pointer-events-none absolute inset-x-0 bottom-8 flex justify-center px-6">
+      <main className="relative flex flex-1 flex-col overflow-hidden">
+        <Canvas />
+
+        <AnimatePresence>
+          {nodeCount === 0 ? (
+            <motion.div
+              key="hero"
+              initial={{ opacity: 0, scale: 0.96 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.96 }}
+              transition={{ type: "spring", stiffness: 420, damping: 32 }}
+              className="pointer-events-none absolute inset-0 flex items-center justify-center"
+            >
+              <div className="flex flex-col items-center gap-3">
+                <h1 className="font-sans text-7xl font-semibold tracking-tight text-neutral-900">
+                  Canvas
+                </h1>
+                <p className="text-sm text-neutral-400">
+                  Ask anything. Branch sideways. Trunk grows down.
+                </p>
+              </div>
+            </motion.div>
+          ) : null}
+        </AnimatePresence>
+
+        <div className="pointer-events-none absolute inset-x-0 bottom-6 flex flex-col items-center gap-2 px-6">
+          {sessionId ? (
+            <span className="rounded-full bg-white/70 px-2.5 py-0.5 font-mono text-[10px] text-neutral-500 shadow-glass backdrop-blur-md">
+              session {sessionId.slice(0, 8)}
+            </span>
+          ) : null}
           <div className="pointer-events-auto w-full max-w-xl">
-            <PromptPill onSubmit={handleSubmit} busy={busy} />
+            <PromptPill onSubmit={submit} busy={busy} />
           </div>
         </div>
+
+        {error ? (
+          <div className="pointer-events-none absolute inset-x-0 top-4 flex justify-center">
+            <span className="rounded-full bg-red-100 px-3 py-1 text-[12px] font-medium text-red-700 shadow-glass">
+              {error}
+            </span>
+          </div>
+        ) : null}
       </main>
-      <DebugPanel events={events} error={error} />
+
+      <AnimatePresence>
+        {showDebug ? (
+          <motion.div
+            key="debug"
+            initial={{ x: 420, opacity: 0 }}
+            animate={{ x: 0, opacity: 1 }}
+            exit={{ x: 420, opacity: 0 }}
+            transition={{ type: "spring", stiffness: 380, damping: 36 }}
+          >
+            <DebugPanel events={events} error={error} />
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
     </div>
   );
 }

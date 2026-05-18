@@ -133,7 +133,7 @@ fn build_args(opts: &SpawnOpts) -> Vec<String> {
     args.push("--verbose".into());
 
     if !opts.allowed_tools.is_empty() {
-        args.push("--allowedTools".into());
+        args.push("--allowed-tools".into());
         args.push(opts.allowed_tools.join(","));
     }
 
