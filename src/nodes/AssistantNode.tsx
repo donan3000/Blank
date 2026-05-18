@@ -14,6 +14,7 @@ interface AssistantData {
   text?: string;
   toolUses?: ToolUse[];
   dimmed?: boolean;
+  wiring?: boolean;
 }
 
 function summarizeInput(name: string, input: unknown): string | null {
@@ -46,14 +47,16 @@ function ToolUsePill({ tool }: { tool: ToolUse }) {
 }
 
 export function AssistantNode({ data }: NodeProps) {
-  const { text = "", toolUses = [], dimmed = false } = data as AssistantData;
+  const { text = "", toolUses = [], dimmed = false, wiring = false } = data as AssistantData;
   return (
     <motion.div
       initial={{ opacity: 0, scale: 0.94 }}
       animate={{ opacity: dimmed ? 0.45 : 1, scale: 1 }}
       transition={{ type: "spring", stiffness: 420, damping: 32 }}
       style={{ width: NODE_WIDTH }}
-      className="glass rounded-3xl border border-black/[0.06] bg-white/85 p-6 shadow-glass backdrop-blur-xl"
+      className={`glass rounded-3xl border border-black/[0.06] bg-white/85 p-6 shadow-glass backdrop-blur-xl ${
+        wiring ? "ring-2 ring-indigo-400 ring-offset-2 ring-offset-canvas" : ""
+      }`}
     >
       {text ? <MarkdownView text={text} /> : null}
       {toolUses.length > 0 ? (

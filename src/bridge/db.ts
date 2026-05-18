@@ -2,9 +2,11 @@ import Database from "@tauri-apps/plugin-sql";
 import type {
   Branch,
   CanvasNode,
+  CrossEdge,
   Island,
   NodeKind,
   BranchFlavor,
+  TransferMode,
 } from "../store/workspace";
 
 const DB_URL = "sqlite:canvas.db";
@@ -40,6 +42,7 @@ export interface Snapshot {
   islands: Island[];
   branches: Branch[];
   nodes: CanvasNode[];
+  crossEdges: CrossEdge[];
   spawns: SpawnRecord[];
 }
 
@@ -132,7 +135,33 @@ export async function hydrate(): Promise<Snapshot> {
     is_error: r.is_error === 1,
   }));
 
-  return { islands, branches, nodes, spawns };
+  const crossEdgeRows = await db.select<
+    {
+      id: string;
+      from_node_id: string;
+      to_node_id: string | null;
+      to_branch_id: string;
+      transfer_mode: string;
+      template: string | null;
+      payload_preview: string | null;
+    }[]
+  >(
+    `SELECT id, from_node_id, to_node_id, to_branch_id, transfer_mode, template, payload_preview
+       FROM cross_edges WHERE workspace_id = $1 ORDER BY created_at ASC`,
+    [DEFAULT_WORKSPACE_ID],
+  );
+
+  const crossEdges: CrossEdge[] = crossEdgeRows.map((r) => ({
+    id: r.id,
+    fromNodeId: r.from_node_id,
+    toNodeId: r.to_node_id,
+    toBranchId: r.to_branch_id,
+    transferMode: r.transfer_mode as TransferMode,
+    template: r.template ?? undefined,
+    payloadPreview: r.payload_preview ?? undefined,
+  }));
+
+  return { islands, branches, nodes, crossEdges, spawns };
 }
 
 export async function persistIsland(island: Island): Promise<void> {
@@ -212,8 +241,30 @@ export async function persistSpawn(record: SpawnRecord): Promise<void> {
   );
 }
 
+export async function persistCrossEdge(edge: CrossEdge): Promise<void> {
+  const db = await getDb();
+  await db.execute(
+    `INSERT OR REPLACE INTO cross_edges
+      (id, workspace_id, from_node_id, to_node_id, to_branch_id, transfer_mode, template, payload_preview, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
+       COALESCE((SELECT created_at FROM cross_edges WHERE id = $1), $9))`,
+    [
+      edge.id,
+      DEFAULT_WORKSPACE_ID,
+      edge.fromNodeId,
+      edge.toNodeId,
+      edge.toBranchId,
+      edge.transferMode,
+      edge.template ?? null,
+      edge.payloadPreview ?? null,
+      Date.now(),
+    ],
+  );
+}
+
 export async function wipeWorkspace(): Promise<void> {
   const db = await getDb();
+  await db.execute(`DELETE FROM cross_edges WHERE workspace_id = $1`, [DEFAULT_WORKSPACE_ID]);
   await db.execute(`DELETE FROM spawns`);
   await db.execute(`DELETE FROM nodes WHERE workspace_id = $1`, [DEFAULT_WORKSPACE_ID]);
   await db.execute(`DELETE FROM branches WHERE workspace_id = $1`, [DEFAULT_WORKSPACE_ID]);

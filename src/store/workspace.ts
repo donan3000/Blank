@@ -5,6 +5,7 @@ import type { ClaudeStreamEvent } from "../bridge/events";
 import {
   hydrate as hydrateDb,
   persistBranch,
+  persistCrossEdge,
   persistIsland,
   persistNode,
   persistSpawn,
@@ -13,6 +14,17 @@ import {
 
 export type NodeKind = "user" | "assistant" | "tool_result";
 export type BranchFlavor = "trunk" | "same_agent" | "new_island";
+export type TransferMode = "raw" | "custom";
+
+export interface CrossEdge {
+  id: string;
+  fromNodeId: string;
+  toNodeId: string | null;
+  toBranchId: string;
+  transferMode: TransferMode;
+  template?: string;
+  payloadPreview?: string;
+}
 
 export interface CanvasNode {
   id: string;
@@ -56,21 +68,32 @@ interface State {
   islands: Island[];
   branches: Branch[];
   nodes: CanvasNode[];
+  crossEdges: CrossEdge[];
   activeBranchId: string;
   events: ClaudeStreamEvent[];
   error: string | null;
   cwd: string;
   hydrated: boolean;
   costByIsland: Record<string, number>;
+  wiringFrom: string | null;
   unlistens: Map<string, UnlistenFn>;
   spawns: Map<string, string>;
 
   hydrate: () => Promise<void>;
-  submit: (prompt: string) => Promise<void>;
+  submit: (prompt: string, branchId?: string) => Promise<void>;
   branchSameAgent: (fromNodeId: string) => void;
   branchNewIsland: (fromNodeId: string, persona?: string) => void;
+  createIsland: (persona?: string) => void;
   setActiveBranch: (id: string) => void;
   cancelActive: () => Promise<void>;
+  startWiring: (fromNodeId: string) => void;
+  cancelWiring: () => void;
+  fireCrossEdge: (
+    fromNodeId: string,
+    toBranchId: string,
+    mode: TransferMode,
+    template?: string,
+  ) => Promise<void>;
   reset: () => void;
   clearAll: () => Promise<void>;
 }
@@ -144,7 +167,7 @@ const TRUNK_BRANCH_ID = "branch-trunk";
 
 function initialState(): Pick<
   State,
-  "islands" | "branches" | "nodes" | "activeBranchId" | "events" | "error"
+  "islands" | "branches" | "nodes" | "crossEdges" | "activeBranchId" | "events" | "error"
 > {
   return {
     islands: [{ id: TRUNK_ISLAND_ID, index: 0, name: "Trunk" }],
@@ -161,6 +184,7 @@ function initialState(): Pick<
       },
     ],
     nodes: [],
+    crossEdges: [],
     activeBranchId: TRUNK_BRANCH_ID,
     events: [],
     error: null,
@@ -172,6 +196,7 @@ export const useWorkspace = create<State>((set, get) => ({
   cwd: "/tmp",
   hydrated: false,
   costByIsland: {},
+  wiringFrom: null,
   unlistens: new Map(),
   spawns: new Map(),
 
@@ -193,6 +218,7 @@ export const useWorkspace = create<State>((set, get) => ({
           islands: snap.islands,
           branches: snap.branches,
           nodes: snap.nodes,
+          crossEdges: snap.crossEdges,
           activeBranchId,
           costByIsland: cost,
           hydrated: true,
@@ -211,9 +237,10 @@ export const useWorkspace = create<State>((set, get) => ({
     }
   },
 
-  submit: async (prompt: string) => {
-    const { activeBranchId, branches, cwd, unlistens } = get();
-    const branch = branches.find((b) => b.id === activeBranchId);
+  submit: async (prompt: string, branchId?: string) => {
+    const targetBranchId = branchId ?? get().activeBranchId;
+    const { branches, cwd, unlistens } = get();
+    const branch = branches.find((b) => b.id === targetBranchId);
     if (!branch) return;
 
     const existing = unlistens.get(branch.id);
@@ -465,6 +492,80 @@ export const useWorkspace = create<State>((set, get) => ({
         b.id === activeBranchId ? { ...b, busy: false } : b,
       ),
     }));
+  },
+
+  createIsland: (persona?: string) => {
+    const { branches, islands } = get();
+    const islandIndex = islands.length;
+    const island: Island = {
+      id: mkId("island"),
+      index: islandIndex,
+      name: `Island ${islandIndex}`,
+      persona,
+    };
+    const newBranch: Branch = {
+      id: mkId("branch"),
+      islandId: island.id,
+      flavor: "new_island",
+      sessionId: null,
+      parentNodeId: null,
+      xOrigin: rightmostX(branches) + NODE_WIDTH + NEW_ISLAND_X_GAP,
+      yOrigin: 0,
+      busy: false,
+    };
+    set((s) => ({
+      islands: [...s.islands, island],
+      branches: [...s.branches, newBranch],
+      activeBranchId: newBranch.id,
+      error: null,
+    }));
+    persistIsland(island).catch(console.error);
+    persistBranch(newBranch).catch(console.error);
+  },
+
+  startWiring: (fromNodeId: string) => {
+    if (!findNode(get().nodes, fromNodeId)) return;
+    set({ wiringFrom: fromNodeId });
+  },
+
+  cancelWiring: () => set({ wiringFrom: null }),
+
+  fireCrossEdge: async (fromNodeId, toBranchId, mode, template) => {
+    const source = findNode(get().nodes, fromNodeId);
+    if (!source) return;
+    const payload =
+      mode === "raw"
+        ? source.text
+        : (template ?? "{{content}}").replaceAll("{{content}}", source.text);
+
+    const edge: CrossEdge = {
+      id: mkId("xedge"),
+      fromNodeId,
+      toNodeId: null,
+      toBranchId,
+      transferMode: mode,
+      template,
+      payloadPreview: payload.slice(0, 600),
+    };
+    set((s) => ({
+      crossEdges: [...s.crossEdges, edge],
+      wiringFrom: null,
+    }));
+
+    await get().submit(payload, toBranchId);
+
+    const lastUser = [...get().nodes]
+      .reverse()
+      .find((n) => n.branchId === toBranchId && n.kind === "user");
+    const finalEdge = lastUser ? { ...edge, toNodeId: lastUser.id } : edge;
+    if (lastUser) {
+      set((s) => ({
+        crossEdges: s.crossEdges.map((c) =>
+          c.id === edge.id ? finalEdge : c,
+        ),
+      }));
+    }
+    persistCrossEdge(finalEdge).catch(console.error);
   },
 
   reset: () => {

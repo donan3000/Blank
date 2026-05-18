@@ -7,7 +7,11 @@ import { NODE_WIDTH } from "../store/workspace";
 const PREVIEW_CHARS = 280;
 
 export function ToolResultNode({ data }: NodeProps) {
-  const { text = "", dimmed = false } = data as { text?: string; dimmed?: boolean };
+  const { text = "", dimmed = false, wiring = false } = data as {
+    text?: string;
+    dimmed?: boolean;
+    wiring?: boolean;
+  };
   const long = text.length > PREVIEW_CHARS;
   const [open, setOpen] = useState(false);
   const visible = long && !open ? text.slice(0, PREVIEW_CHARS) + "…" : text;
@@ -18,7 +22,9 @@ export function ToolResultNode({ data }: NodeProps) {
       animate={{ opacity: dimmed ? 0.35 : 1, scale: 1 }}
       transition={{ type: "spring", stiffness: 420, damping: 32 }}
       style={{ width: NODE_WIDTH }}
-      className="glass rounded-3xl border border-black/[0.04] bg-white/70 p-5 shadow-glass backdrop-blur-xl"
+      className={`glass rounded-3xl border border-black/[0.04] bg-white/70 p-5 shadow-glass backdrop-blur-xl ${
+        wiring ? "ring-2 ring-indigo-400 ring-offset-2 ring-offset-canvas" : ""
+      }`}
     >
       <div className="mb-2 flex items-center justify-between text-[11px] uppercase tracking-wider text-neutral-400">
         <span>Tool result</span>
