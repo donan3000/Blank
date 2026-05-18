@@ -4,44 +4,63 @@ import { cancelClaude, spawnClaude, subscribeEvents } from "../bridge/claude";
 import type { ClaudeStreamEvent } from "../bridge/events";
 
 export type NodeKind = "user" | "assistant" | "tool_result";
+export type BranchFlavor = "trunk" | "same_agent" | "new_island";
 
 export interface CanvasNode {
   id: string;
   kind: NodeKind;
+  branchId: string;
   position: { x: number; y: number };
   text: string;
   toolUses?: { id: string; name: string; input: unknown }[];
-  sessionId?: string;
   raw?: unknown;
 }
 
-interface State {
-  trunkSessionId: string | null;
-  nodes: CanvasNode[];
-  events: ClaudeStreamEvent[];
+export interface Branch {
+  id: string;
+  islandId: string;
+  flavor: BranchFlavor;
+  sessionId: string | null;
+  parentNodeId: string | null;
+  xOrigin: number;
+  yOrigin: number;
   busy: boolean;
-  error: string | null;
-  cwd: string;
-  unlisten: UnlistenFn | null;
-  spawnId: string | null;
+}
 
-  submit: (prompt: string) => Promise<void>;
-  cancel: () => Promise<void>;
-  reset: () => void;
+export interface Island {
+  id: string;
+  index: number;
+  name?: string;
+  persona?: string;
 }
 
 export const NODE_WIDTH = 560;
 const VERTICAL_GAP = 32;
+const BRANCH_X_GAP = 96;
+const NEW_ISLAND_X_GAP = 192;
 const HEIGHT_GUESS: Record<NodeKind, number> = {
   user: 96,
   assistant: 220,
   tool_result: 140,
 };
 
-function nextY(nodes: CanvasNode[]): number {
-  if (nodes.length === 0) return 0;
-  const last = nodes[nodes.length - 1];
-  return last.position.y + HEIGHT_GUESS[last.kind] + VERTICAL_GAP;
+interface State {
+  islands: Island[];
+  branches: Branch[];
+  nodes: CanvasNode[];
+  activeBranchId: string;
+  events: ClaudeStreamEvent[];
+  error: string | null;
+  cwd: string;
+  unlistens: Map<string, UnlistenFn>;
+  spawns: Map<string, string>;
+
+  submit: (prompt: string) => Promise<void>;
+  branchSameAgent: (fromNodeId: string) => void;
+  branchNewIsland: (fromNodeId: string, persona?: string) => void;
+  setActiveBranch: (id: string) => void;
+  cancelActive: () => Promise<void>;
+  reset: () => void;
 }
 
 interface MessageBlock {
@@ -89,119 +108,301 @@ function extractToolResult(message: unknown): string {
   return parts.join("\n");
 }
 
-let nodeCounter = 0;
-const nodeId = (kind: NodeKind) =>
-  `${kind}-${Date.now().toString(36)}-${(nodeCounter++).toString(36)}`;
+let idSeed = 0;
+const mkId = (prefix: string) =>
+  `${prefix}-${Date.now().toString(36)}-${(idSeed++).toString(36)}`;
+
+function branchTailY(branch: Branch, nodes: CanvasNode[]): number {
+  const branchNodes = nodes.filter((n) => n.branchId === branch.id);
+  if (branchNodes.length === 0) return branch.yOrigin;
+  const last = branchNodes[branchNodes.length - 1];
+  return last.position.y + HEIGHT_GUESS[last.kind] + VERTICAL_GAP;
+}
+
+function findNode(nodes: CanvasNode[], id: string): CanvasNode | undefined {
+  return nodes.find((n) => n.id === id);
+}
+
+function rightmostX(branches: Branch[]): number {
+  return branches.reduce((max, b) => Math.max(max, b.xOrigin), 0);
+}
+
+const TRUNK_ISLAND_ID = "island-0";
+const TRUNK_BRANCH_ID = "branch-trunk";
+
+function initialState(): Pick<
+  State,
+  "islands" | "branches" | "nodes" | "activeBranchId" | "events" | "error"
+> {
+  return {
+    islands: [{ id: TRUNK_ISLAND_ID, index: 0, name: "Trunk" }],
+    branches: [
+      {
+        id: TRUNK_BRANCH_ID,
+        islandId: TRUNK_ISLAND_ID,
+        flavor: "trunk",
+        sessionId: null,
+        parentNodeId: null,
+        xOrigin: 0,
+        yOrigin: 0,
+        busy: false,
+      },
+    ],
+    nodes: [],
+    activeBranchId: TRUNK_BRANCH_ID,
+    events: [],
+    error: null,
+  };
+}
 
 export const useWorkspace = create<State>((set, get) => ({
-  trunkSessionId: null,
-  nodes: [],
-  events: [],
-  busy: false,
-  error: null,
+  ...initialState(),
   cwd: "/tmp",
-  unlisten: null,
-  spawnId: null,
+  unlistens: new Map(),
+  spawns: new Map(),
 
   submit: async (prompt: string) => {
-    const { trunkSessionId, cwd, unlisten } = get();
-    if (unlisten) {
-      unlisten();
-      set({ unlisten: null });
+    const { activeBranchId, branches, cwd, unlistens } = get();
+    const branch = branches.find((b) => b.id === activeBranchId);
+    if (!branch) return;
+
+    const existing = unlistens.get(branch.id);
+    if (existing) {
+      existing();
+      unlistens.delete(branch.id);
     }
-    set({ busy: true, error: null });
+
+    set({ error: null });
+    set((s) => ({
+      branches: s.branches.map((b) =>
+        b.id === branch.id ? { ...b, busy: true } : b,
+      ),
+    }));
 
     const userNode: CanvasNode = {
-      id: nodeId("user"),
+      id: mkId("user"),
       kind: "user",
-      position: { x: 0, y: nextY(get().nodes) },
+      branchId: branch.id,
+      position: {
+        x: branch.xOrigin,
+        y: branchTailY(branch, get().nodes),
+      },
       text: prompt,
     };
-    set({ nodes: [...get().nodes, userNode] });
+    set((s) => ({ nodes: [...s.nodes, userNode] }));
 
     try {
+      const isFirstTurnOfBranch = branch.sessionId === null;
+      const isFork = isFirstTurnOfBranch && branch.flavor === "same_agent";
+      const parentNode = branch.parentNodeId
+        ? findNode(get().nodes, branch.parentNodeId)
+        : undefined;
+      const parentBranch = parentNode
+        ? get().branches.find((b) => b.id === parentNode.branchId)
+        : undefined;
+      const resumeFrom = branch.sessionId ?? (isFork ? parentBranch?.sessionId ?? undefined : undefined);
+
+      const island =
+        branch.flavor === "new_island" && isFirstTurnOfBranch
+          ? get().islands.find((i) => i.id === branch.islandId)
+          : undefined;
+      const appendSys = island?.persona || undefined;
+
       const spawnId = await spawnClaude({
         prompt,
-        fork: false,
+        fork: isFork,
         cwd,
         allowed_tools: ["Read", "Bash", "Edit", "Write"],
-        resume_from: trunkSessionId ?? undefined,
+        resume_from: resumeFrom,
+        append_system_prompt: appendSys,
       });
 
-      const newUnlisten = await subscribeEvents(
+      get().spawns.set(branch.id, spawnId);
+
+      const unlisten = await subscribeEvents(
         spawnId,
         (e) => {
           set((s) => ({ events: [...s.events, e] }));
 
           if (e.type === "system" && e.subtype === "init") {
-            if (!get().trunkSessionId) set({ trunkSessionId: e.session_id });
+            set((s) => ({
+              branches: s.branches.map((b) =>
+                b.id === branch.id && !b.sessionId
+                  ? { ...b, sessionId: e.session_id }
+                  : b,
+              ),
+            }));
             return;
           }
 
           if (e.type === "assistant") {
             const { text, toolUses } = extractAssistant(e.message);
             if (!text && toolUses.length === 0) return;
-            const node: CanvasNode = {
-              id: nodeId("assistant"),
-              kind: "assistant",
-              position: { x: 0, y: nextY(get().nodes) },
-              text,
-              toolUses,
-              sessionId: e.session_id,
-              raw: e.message,
-            };
-            set({ nodes: [...get().nodes, node] });
+            set((s) => {
+              const b = s.branches.find((x) => x.id === branch.id);
+              if (!b) return s;
+              const node: CanvasNode = {
+                id: mkId("assistant"),
+                kind: "assistant",
+                branchId: branch.id,
+                position: { x: b.xOrigin, y: branchTailY(b, s.nodes) },
+                text,
+                toolUses,
+                raw: e.message,
+              };
+              return { nodes: [...s.nodes, node] };
+            });
             return;
           }
 
           if (e.type === "user") {
             const text = extractToolResult(e.message);
             if (!text) return;
-            const node: CanvasNode = {
-              id: nodeId("tool_result"),
-              kind: "tool_result",
-              position: { x: 0, y: nextY(get().nodes) },
-              text,
-              raw: e.message,
-            };
-            set({ nodes: [...get().nodes, node] });
+            set((s) => {
+              const b = s.branches.find((x) => x.id === branch.id);
+              if (!b) return s;
+              const node: CanvasNode = {
+                id: mkId("tool_result"),
+                kind: "tool_result",
+                branchId: branch.id,
+                position: { x: b.xOrigin, y: branchTailY(b, s.nodes) },
+                text,
+                raw: e.message,
+              };
+              return { nodes: [...s.nodes, node] };
+            });
             return;
           }
 
           if (e.type === "result") {
-            set({ busy: false });
+            set((s) => ({
+              branches: s.branches.map((b) =>
+                b.id === branch.id ? { ...b, busy: false } : b,
+              ),
+            }));
           }
         },
-        () => set({ busy: false, spawnId: null }),
+        () => {
+          set((s) => ({
+            branches: s.branches.map((b) =>
+              b.id === branch.id ? { ...b, busy: false } : b,
+            ),
+          }));
+          get().spawns.delete(branch.id);
+        },
       );
 
-      set({ unlisten: newUnlisten, spawnId });
+      get().unlistens.set(branch.id, unlisten);
     } catch (err) {
-      set({
+      set((s) => ({
         error: err instanceof Error ? err.message : String(err),
-        busy: false,
-      });
+        branches: s.branches.map((b) =>
+          b.id === branch.id ? { ...b, busy: false } : b,
+        ),
+      }));
     }
   },
 
-  cancel: async () => {
-    const { spawnId, unlisten } = get();
+  branchSameAgent: (fromNodeId: string) => {
+    const { nodes, branches } = get();
+    const parentNode = findNode(nodes, fromNodeId);
+    if (!parentNode) return;
+    const parentBranch = branches.find((b) => b.id === parentNode.branchId);
+    if (!parentBranch?.sessionId) {
+      set({
+        error:
+          "Cannot fork: parent branch has no session yet. Wait for first response.",
+      });
+      return;
+    }
+
+    const newBranch: Branch = {
+      id: mkId("branch"),
+      islandId: parentBranch.islandId,
+      flavor: "same_agent",
+      sessionId: null,
+      parentNodeId: parentNode.id,
+      xOrigin: rightmostX(branches) + NODE_WIDTH + BRANCH_X_GAP,
+      yOrigin: parentNode.position.y,
+      busy: false,
+    };
+
+    set((s) => ({
+      branches: [...s.branches, newBranch],
+      activeBranchId: newBranch.id,
+      error: null,
+    }));
+  },
+
+  branchNewIsland: (fromNodeId: string, persona?: string) => {
+    const { nodes, branches, islands } = get();
+    const parentNode = findNode(nodes, fromNodeId);
+    if (!parentNode) return;
+
+    const islandIndex = islands.length;
+    const island: Island = {
+      id: mkId("island"),
+      index: islandIndex,
+      name: `Island ${islandIndex}`,
+      persona,
+    };
+
+    const newBranch: Branch = {
+      id: mkId("branch"),
+      islandId: island.id,
+      flavor: "new_island",
+      sessionId: null,
+      parentNodeId: parentNode.id,
+      xOrigin: rightmostX(branches) + NODE_WIDTH + NEW_ISLAND_X_GAP,
+      yOrigin: parentNode.position.y,
+      busy: false,
+    };
+
+    set((s) => ({
+      islands: [...s.islands, island],
+      branches: [...s.branches, newBranch],
+      activeBranchId: newBranch.id,
+      error: null,
+    }));
+  },
+
+  setActiveBranch: (id: string) => {
+    if (get().branches.some((b) => b.id === id)) {
+      set({ activeBranchId: id });
+    }
+  },
+
+  cancelActive: async () => {
+    const { activeBranchId, spawns, unlistens } = get();
+    const spawnId = spawns.get(activeBranchId);
     if (spawnId) await cancelClaude(spawnId).catch(() => {});
+    const unlisten = unlistens.get(activeBranchId);
     if (unlisten) unlisten();
-    set({ unlisten: null, spawnId: null, busy: false });
+    unlistens.delete(activeBranchId);
+    spawns.delete(activeBranchId);
+    set((s) => ({
+      branches: s.branches.map((b) =>
+        b.id === activeBranchId ? { ...b, busy: false } : b,
+      ),
+    }));
   },
 
   reset: () => {
-    const { unlisten } = get();
-    if (unlisten) unlisten();
-    set({
-      trunkSessionId: null,
-      nodes: [],
-      events: [],
-      busy: false,
-      error: null,
-      unlisten: null,
-      spawnId: null,
-    });
+    const { unlistens, spawns } = get();
+    for (const fn of unlistens.values()) fn();
+    for (const sid of spawns.values()) cancelClaude(sid).catch(() => {});
+    unlistens.clear();
+    spawns.clear();
+    set({ ...initialState(), cwd: get().cwd });
   },
 }));
+
+export function useActiveBranch(): Branch | undefined {
+  return useWorkspace((s) => s.branches.find((b) => b.id === s.activeBranchId));
+}
+
+export function useActiveBusy(): boolean {
+  return useWorkspace(
+    (s) => s.branches.find((b) => b.id === s.activeBranchId)?.busy ?? false,
+  );
+}

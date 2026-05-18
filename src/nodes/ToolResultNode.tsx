@@ -7,7 +7,7 @@ import { NODE_WIDTH } from "../store/workspace";
 const PREVIEW_CHARS = 280;
 
 export function ToolResultNode({ data }: NodeProps) {
-  const text = (data as { text?: string }).text ?? "";
+  const { text = "", dimmed = false } = data as { text?: string; dimmed?: boolean };
   const long = text.length > PREVIEW_CHARS;
   const [open, setOpen] = useState(false);
   const visible = long && !open ? text.slice(0, PREVIEW_CHARS) + "…" : text;
@@ -15,7 +15,7 @@ export function ToolResultNode({ data }: NodeProps) {
   return (
     <motion.div
       initial={{ opacity: 0, scale: 0.96 }}
-      animate={{ opacity: 1, scale: 1 }}
+      animate={{ opacity: dimmed ? 0.35 : 1, scale: 1 }}
       transition={{ type: "spring", stiffness: 420, damping: 32 }}
       style={{ width: NODE_WIDTH }}
       className="glass rounded-3xl border border-black/[0.04] bg-white/70 p-5 shadow-glass backdrop-blur-xl"

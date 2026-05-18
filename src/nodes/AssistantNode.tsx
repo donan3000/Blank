@@ -6,14 +6,15 @@ import { NODE_WIDTH } from "../store/workspace";
 interface AssistantData {
   text?: string;
   toolUses?: { id: string; name: string; input: unknown }[];
+  dimmed?: boolean;
 }
 
 export function AssistantNode({ data }: NodeProps) {
-  const { text = "", toolUses = [] } = data as AssistantData;
+  const { text = "", toolUses = [], dimmed = false } = data as AssistantData;
   return (
     <motion.div
       initial={{ opacity: 0, scale: 0.94 }}
-      animate={{ opacity: 1, scale: 1 }}
+      animate={{ opacity: dimmed ? 0.45 : 1, scale: 1 }}
       transition={{ type: "spring", stiffness: 420, damping: 32 }}
       style={{ width: NODE_WIDTH }}
       className="glass rounded-3xl border border-black/[0.06] bg-white/85 p-6 shadow-glass backdrop-blur-xl"

@@ -1,19 +1,27 @@
 import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { useWorkspace } from "./store/workspace";
+import { useActiveBusy, useWorkspace } from "./store/workspace";
 import { Canvas } from "./canvas/Canvas";
 import { PromptPill } from "./components/PromptPill";
 import { DebugPanel } from "./components/DebugPanel";
+import { NodeContextMenu } from "./components/NodeContextMenu";
+import { BranchIndicator } from "./components/BranchIndicator";
+
+interface ContextMenuState {
+  nodeId: string;
+  x: number;
+  y: number;
+}
 
 export default function App() {
   const submit = useWorkspace((s) => s.submit);
-  const busy = useWorkspace((s) => s.busy);
+  const busy = useActiveBusy();
   const events = useWorkspace((s) => s.events);
   const error = useWorkspace((s) => s.error);
   const reset = useWorkspace((s) => s.reset);
   const nodeCount = useWorkspace((s) => s.nodes.length);
-  const sessionId = useWorkspace((s) => s.trunkSessionId);
   const [showDebug, setShowDebug] = useState(false);
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -21,9 +29,15 @@ export default function App() {
         e.preventDefault();
         setShowDebug((v) => !v);
       }
+      if (e.key === "Escape") setContextMenu(null);
     };
+    const onClickAnywhere = () => setContextMenu(null);
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("mousedown", onClickAnywhere);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("mousedown", onClickAnywhere);
+    };
   }, []);
 
   useEffect(() => {
@@ -33,7 +47,11 @@ export default function App() {
   return (
     <div className="flex h-full w-full bg-canvas text-neutral-900">
       <main className="relative flex flex-1 flex-col overflow-hidden">
-        <Canvas />
+        <Canvas
+          onNodeContextMenu={(e, nodeId) =>
+            setContextMenu({ nodeId, x: e.clientX, y: e.clientY })
+          }
+        />
 
         <AnimatePresence>
           {nodeCount === 0 ? (
@@ -50,7 +68,7 @@ export default function App() {
                   Canvas
                 </h1>
                 <p className="text-sm text-neutral-400">
-                  Ask anything. Branch sideways. Trunk grows down.
+                  Ask anything. Right-click a message to branch.
                 </p>
               </div>
             </motion.div>
@@ -58,11 +76,7 @@ export default function App() {
         </AnimatePresence>
 
         <div className="pointer-events-none absolute inset-x-0 bottom-6 flex flex-col items-center gap-2 px-6">
-          {sessionId ? (
-            <span className="rounded-full bg-white/70 px-2.5 py-0.5 font-mono text-[10px] text-neutral-500 shadow-glass backdrop-blur-md">
-              session {sessionId.slice(0, 8)}
-            </span>
-          ) : null}
+          <BranchIndicator />
           <div className="pointer-events-auto w-full max-w-xl">
             <PromptPill onSubmit={submit} busy={busy} />
           </div>
@@ -75,6 +89,17 @@ export default function App() {
             </span>
           </div>
         ) : null}
+
+        <AnimatePresence>
+          {contextMenu ? (
+            <NodeContextMenu
+              nodeId={contextMenu.nodeId}
+              x={contextMenu.x}
+              y={contextMenu.y}
+              onClose={() => setContextMenu(null)}
+            />
+          ) : null}
+        </AnimatePresence>
       </main>
 
       <AnimatePresence>
