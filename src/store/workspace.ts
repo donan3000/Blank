@@ -2,6 +2,14 @@ import { create } from "zustand";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { cancelClaude, spawnClaude, subscribeEvents } from "../bridge/claude";
 import type { ClaudeStreamEvent } from "../bridge/events";
+import {
+  hydrate as hydrateDb,
+  persistBranch,
+  persistIsland,
+  persistNode,
+  persistSpawn,
+  wipeWorkspace,
+} from "../bridge/db";
 
 export type NodeKind = "user" | "assistant" | "tool_result";
 export type BranchFlavor = "trunk" | "same_agent" | "new_island";
@@ -52,15 +60,19 @@ interface State {
   events: ClaudeStreamEvent[];
   error: string | null;
   cwd: string;
+  hydrated: boolean;
+  costByIsland: Record<string, number>;
   unlistens: Map<string, UnlistenFn>;
   spawns: Map<string, string>;
 
+  hydrate: () => Promise<void>;
   submit: (prompt: string) => Promise<void>;
   branchSameAgent: (fromNodeId: string) => void;
   branchNewIsland: (fromNodeId: string, persona?: string) => void;
   setActiveBranch: (id: string) => void;
   cancelActive: () => Promise<void>;
   reset: () => void;
+  clearAll: () => Promise<void>;
 }
 
 interface MessageBlock {
@@ -158,8 +170,46 @@ function initialState(): Pick<
 export const useWorkspace = create<State>((set, get) => ({
   ...initialState(),
   cwd: "/tmp",
+  hydrated: false,
+  costByIsland: {},
   unlistens: new Map(),
   spawns: new Map(),
+
+  hydrate: async () => {
+    try {
+      const snap = await hydrateDb();
+      if (snap.branches.length > 0) {
+        const cost: Record<string, number> = {};
+        const branchToIsland = new Map<string, string>();
+        for (const b of snap.branches) branchToIsland.set(b.id, b.islandId);
+        for (const s of snap.spawns) {
+          const islandId = branchToIsland.get(s.branch_id);
+          if (!islandId) continue;
+          cost[islandId] = (cost[islandId] ?? 0) + s.cost_usd;
+        }
+        const activeBranchId =
+          snap.branches.find((b) => b.flavor === "trunk")?.id ?? snap.branches[0].id;
+        set({
+          islands: snap.islands,
+          branches: snap.branches,
+          nodes: snap.nodes,
+          activeBranchId,
+          costByIsland: cost,
+          hydrated: true,
+        });
+      } else {
+        const { islands, branches } = get();
+        for (const island of islands) await persistIsland(island);
+        for (const branch of branches) await persistBranch(branch);
+        set({ hydrated: true });
+      }
+    } catch (err) {
+      set({
+        error: `db hydrate failed: ${err instanceof Error ? err.message : String(err)}`,
+        hydrated: true,
+      });
+    }
+  },
 
   submit: async (prompt: string) => {
     const { activeBranchId, branches, cwd, unlistens } = get();
@@ -190,6 +240,7 @@ export const useWorkspace = create<State>((set, get) => ({
       text: prompt,
     };
     set((s) => ({ nodes: [...s.nodes, userNode] }));
+    persistNode(userNode).catch(console.error);
 
     try {
       const isFirstTurnOfBranch = branch.sessionId === null;
@@ -225,23 +276,29 @@ export const useWorkspace = create<State>((set, get) => ({
           set((s) => ({ events: [...s.events, e] }));
 
           if (e.type === "system" && e.subtype === "init") {
-            set((s) => ({
-              branches: s.branches.map((b) =>
-                b.id === branch.id && !b.sessionId
-                  ? { ...b, sessionId: e.session_id }
-                  : b,
-              ),
-            }));
+            let updated: Branch | undefined;
+            set((s) => {
+              const next = s.branches.map((b) => {
+                if (b.id === branch.id && !b.sessionId) {
+                  updated = { ...b, sessionId: e.session_id };
+                  return updated;
+                }
+                return b;
+              });
+              return { branches: next };
+            });
+            if (updated) persistBranch(updated).catch(console.error);
             return;
           }
 
           if (e.type === "assistant") {
             const { text, toolUses } = extractAssistant(e.message);
             if (!text && toolUses.length === 0) return;
+            let added: CanvasNode | undefined;
             set((s) => {
               const b = s.branches.find((x) => x.id === branch.id);
               if (!b) return s;
-              const node: CanvasNode = {
+              added = {
                 id: mkId("assistant"),
                 kind: "assistant",
                 branchId: branch.id,
@@ -250,18 +307,20 @@ export const useWorkspace = create<State>((set, get) => ({
                 toolUses,
                 raw: e.message,
               };
-              return { nodes: [...s.nodes, node] };
+              return { nodes: [...s.nodes, added] };
             });
+            if (added) persistNode(added).catch(console.error);
             return;
           }
 
           if (e.type === "user") {
             const text = extractToolResult(e.message);
             if (!text) return;
+            let added: CanvasNode | undefined;
             set((s) => {
               const b = s.branches.find((x) => x.id === branch.id);
               if (!b) return s;
-              const node: CanvasNode = {
+              added = {
                 id: mkId("tool_result"),
                 kind: "tool_result",
                 branchId: branch.id,
@@ -269,17 +328,35 @@ export const useWorkspace = create<State>((set, get) => ({
                 text,
                 raw: e.message,
               };
-              return { nodes: [...s.nodes, node] };
+              return { nodes: [...s.nodes, added] };
             });
+            if (added) persistNode(added).catch(console.error);
             return;
           }
 
           if (e.type === "result") {
+            const spawnIdForBranch = get().spawns.get(branch.id);
+            const islandId = get().branches.find((b) => b.id === branch.id)?.islandId;
             set((s) => ({
               branches: s.branches.map((b) =>
                 b.id === branch.id ? { ...b, busy: false } : b,
               ),
+              costByIsland: islandId
+                ? {
+                    ...s.costByIsland,
+                    [islandId]: (s.costByIsland[islandId] ?? 0) + e.total_cost_usd,
+                  }
+                : s.costByIsland,
             }));
+            if (spawnIdForBranch) {
+              persistSpawn({
+                spawn_id: spawnIdForBranch,
+                branch_id: branch.id,
+                cost_usd: e.total_cost_usd,
+                duration_ms: e.duration_ms,
+                is_error: e.is_error,
+              }).catch(console.error);
+            }
           }
         },
         () => {
@@ -332,6 +409,7 @@ export const useWorkspace = create<State>((set, get) => ({
       activeBranchId: newBranch.id,
       error: null,
     }));
+    persistBranch(newBranch).catch(console.error);
   },
 
   branchNewIsland: (fromNodeId: string, persona?: string) => {
@@ -364,6 +442,8 @@ export const useWorkspace = create<State>((set, get) => ({
       activeBranchId: newBranch.id,
       error: null,
     }));
+    persistIsland(island).catch(console.error);
+    persistBranch(newBranch).catch(console.error);
   },
 
   setActiveBranch: (id: string) => {
@@ -393,7 +473,19 @@ export const useWorkspace = create<State>((set, get) => ({
     for (const sid of spawns.values()) cancelClaude(sid).catch(() => {});
     unlistens.clear();
     spawns.clear();
-    set({ ...initialState(), cwd: get().cwd });
+  },
+
+  clearAll: async () => {
+    const { unlistens, spawns } = get();
+    for (const fn of unlistens.values()) fn();
+    for (const sid of spawns.values()) cancelClaude(sid).catch(() => {});
+    unlistens.clear();
+    spawns.clear();
+    await wipeWorkspace();
+    const fresh = initialState();
+    set({ ...fresh, costByIsland: {}, hydrated: true });
+    for (const island of fresh.islands) await persistIsland(island);
+    for (const branch of fresh.branches) await persistBranch(branch);
   },
 }));
 

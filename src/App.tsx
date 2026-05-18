@@ -6,6 +6,7 @@ import { PromptPill } from "./components/PromptPill";
 import { DebugPanel } from "./components/DebugPanel";
 import { NodeContextMenu } from "./components/NodeContextMenu";
 import { BranchIndicator } from "./components/BranchIndicator";
+import { CostMeter } from "./components/CostMeter";
 
 interface ContextMenuState {
   nodeId: string;
@@ -19,9 +20,15 @@ export default function App() {
   const events = useWorkspace((s) => s.events);
   const error = useWorkspace((s) => s.error);
   const reset = useWorkspace((s) => s.reset);
+  const hydrate = useWorkspace((s) => s.hydrate);
+  const hydrated = useWorkspace((s) => s.hydrated);
   const nodeCount = useWorkspace((s) => s.nodes.length);
   const [showDebug, setShowDebug] = useState(false);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+
+  useEffect(() => {
+    if (!hydrated) hydrate();
+  }, [hydrated, hydrate]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -82,13 +89,14 @@ export default function App() {
           </div>
         </div>
 
-        {error ? (
-          <div className="pointer-events-none absolute inset-x-0 top-4 flex justify-center">
+        <div className="pointer-events-none absolute right-4 top-4 flex flex-col items-end gap-2">
+          <CostMeter />
+          {error ? (
             <span className="rounded-full bg-red-100 px-3 py-1 text-[12px] font-medium text-red-700 shadow-glass">
               {error}
             </span>
-          </div>
-        ) : null}
+          ) : null}
+        </div>
 
         <AnimatePresence>
           {contextMenu ? (

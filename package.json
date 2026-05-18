@@ -15,6 +15,7 @@
   "dependencies": {
     "@tauri-apps/api": "^2.1.1",
     "@tauri-apps/plugin-shell": "^2.0.1",
+    "@tauri-apps/plugin-sql": "^2.4.0",
     "@xyflow/react": "^12.3.5",
     "framer-motion": "^11.11.17",
     "highlight.js": "^11.11.1",
