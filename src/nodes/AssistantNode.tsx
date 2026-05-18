@@ -2,11 +2,47 @@ import { Handle, Position, type NodeProps } from "@xyflow/react";
 import { motion } from "framer-motion";
 import { Wrench } from "lucide-react";
 import { NODE_WIDTH } from "../store/workspace";
+import { MarkdownView } from "../components/MarkdownView";
+
+interface ToolUse {
+  id: string;
+  name: string;
+  input: unknown;
+}
 
 interface AssistantData {
   text?: string;
-  toolUses?: { id: string; name: string; input: unknown }[];
+  toolUses?: ToolUse[];
   dimmed?: boolean;
+}
+
+function summarizeInput(name: string, input: unknown): string | null {
+  if (!input || typeof input !== "object") return null;
+  const i = input as Record<string, unknown>;
+  if (name === "Bash" && typeof i.command === "string") return i.command;
+  if ((name === "Read" || name === "Edit" || name === "Write") && typeof i.file_path === "string") {
+    return i.file_path as string;
+  }
+  return null;
+}
+
+function ToolUsePill({ tool }: { tool: ToolUse }) {
+  const summary = summarizeInput(tool.name, tool.input);
+  return (
+    <div className="flex items-start gap-2 rounded-2xl border border-black/[0.04] bg-black/[0.02] px-3 py-2">
+      <Wrench size={12} strokeWidth={2.25} className="mt-1 text-neutral-500" />
+      <div className="min-w-0 flex-1">
+        <div className="font-mono text-[11px] uppercase tracking-wider text-neutral-500">
+          {tool.name}
+        </div>
+        {summary ? (
+          <div className="mt-0.5 truncate font-mono text-[12px] text-neutral-800">
+            {summary}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
 }
 
 export function AssistantNode({ data }: NodeProps) {
@@ -19,21 +55,11 @@ export function AssistantNode({ data }: NodeProps) {
       style={{ width: NODE_WIDTH }}
       className="glass rounded-3xl border border-black/[0.06] bg-white/85 p-6 shadow-glass backdrop-blur-xl"
     >
-      {text ? (
-        <p className="whitespace-pre-wrap text-[15px] leading-relaxed text-neutral-900">
-          {text}
-        </p>
-      ) : null}
+      {text ? <MarkdownView text={text} /> : null}
       {toolUses.length > 0 ? (
-        <div className={`flex flex-wrap gap-2 ${text ? "mt-4" : ""}`}>
+        <div className={`flex flex-col gap-2 ${text ? "mt-4" : ""}`}>
           {toolUses.map((t) => (
-            <span
-              key={t.id}
-              className="inline-flex items-center gap-1.5 rounded-full bg-black/[0.04] px-3 py-1 font-mono text-[11px] text-neutral-600"
-            >
-              <Wrench size={11} strokeWidth={2.25} />
-              {t.name}
-            </span>
+            <ToolUsePill key={t.id} tool={t} />
           ))}
         </div>
       ) : null}

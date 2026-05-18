@@ -2,6 +2,19 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Syntax highlighting (highlight.js github-dark, suited to our dark code blocks) */
+@import "highlight.js/styles/github-dark.css";
+
+.markdown-body pre code.hljs {
+  background: transparent;
+  padding: 0;
+  color: #e5e7eb;
+}
+
+.markdown-body code:not(pre code) {
+  background: rgba(0, 0, 0, 0.06);
+}
+
 html,
 body,
 #root {
