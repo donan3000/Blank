@@ -1,0 +1,22 @@
+[package]
+name = "canvas-claude"
+version = "0.1.0"
+edition = "2021"
+default-run = "canvas-claude"
+
+[lib]
+name = "canvas_claude_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+anyhow = "1"
+dashmap = "6"

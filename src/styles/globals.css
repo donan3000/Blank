@@ -1,0 +1,35 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: -apple-system, "SF Pro Display", "SF Pro Text", system-ui,
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Subtle glass-edge highlight on .glass cards */
+.glass {
+  position: relative;
+}
+
+.glass::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.5) 0%,
+    rgba(255, 255, 255, 0) 35%
+  );
+  mix-blend-mode: overlay;
+}
