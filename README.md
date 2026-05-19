@@ -13,6 +13,7 @@ Runs on macOS, wrapping your existing Claude Code subscription (no separate API 
 | Feature | Notes |
 |---|---|
 | Trunk conversation | Vertical chat; `--resume` keeps the same session across turns. |
+| Live token streaming | Assistant text streams token-by-token via `--include-partial-messages`; tool uses attach on the final message. |
 | Same-agent branching | Right-click a node → "Branch same agent". Uses `--fork-session` so the parent transcript is cache-hit by the fork. |
 | New-island branching | Right-click → "Branch into new island". Fresh session, optional persona via `--append-system-prompt`. |
 | Standalone islands | "+ New island" button (top-left) creates an island with no parent. |
@@ -20,6 +21,8 @@ Runs on macOS, wrapping your existing Claude Code subscription (no separate API 
 | Markdown rendering | react-markdown + remark-gfm + rehype-highlight in assistant messages. |
 | HTML preview | ` ```html` blocks get a Preview button → sandboxed iframe modal. |
 | Tool-use display | Bash / Read / Edit / Write show command or file path inline. |
+| Bash result rendering | Tool-result nodes for Bash render as dark terminal cards; other tools stay in the lighter style. |
+| Working directory | Top-left folder chip opens a native picker; cwd persists per workspace. |
 | Persistence | SQLite at the app's data dir; canvas, branches, islands, cross-edges, cost all survive close/reopen. |
 | Cost meter | Top-right chip; hover for per-island breakdown. |
 | Debug stream | `Cmd/Ctrl+D` toggles raw stream-json events panel. |
@@ -87,9 +90,9 @@ src-tauri/
 ## Known caveats
 
 - The `--allowed-tools` allowlist is hardcoded to `Read, Bash, Edit, Write`. To use Claude's other tools, edit `src/store/workspace.ts` `submit()` (per-workspace config will land in a later pass).
-- Working directory for spawned `claude` is hardcoded to `/tmp`. Per-workspace cwd config is also pending.
 - Same-agent branching errors if the parent branch hasn't captured its `session_id` yet (i.e. before the first response). Wait for the trunk's first reply, then branch.
-- `summary` transfer mode is not yet wired up; only `raw` and `custom` ship in v1.
+- `summary` transfer mode is not yet wired up; only `raw` and `custom` ship for cross-island wires.
+- Edit/Write tool results don't render as side-by-side diffs yet; they fall back to the plain monospace card.
 - App icons in `src-tauri/icons/` are 32x32 placeholders. Generate real ones with `pnpm tauri icon path/to/source.png` before distributing.
 - macOS Gatekeeper / notarization is not configured; this builds as an unsigned `.app`.
 
