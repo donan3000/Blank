@@ -30,6 +30,25 @@ async function ensureWorkspace(): Promise<void> {
   );
 }
 
+export async function loadWorkspaceCwd(): Promise<string> {
+  await ensureWorkspace();
+  const db = await getDb();
+  const rows = await db.select<{ cwd: string }[]>(
+    `SELECT cwd FROM workspaces WHERE id = $1`,
+    [DEFAULT_WORKSPACE_ID],
+  );
+  return rows[0]?.cwd ?? DEFAULT_CWD;
+}
+
+export async function updateWorkspaceCwd(cwd: string): Promise<void> {
+  await ensureWorkspace();
+  const db = await getDb();
+  await db.execute(
+    `UPDATE workspaces SET cwd = $1 WHERE id = $2`,
+    [cwd, DEFAULT_WORKSPACE_ID],
+  );
+}
+
 export interface SpawnRecord {
   spawn_id: string;
   branch_id: string;
@@ -78,11 +97,12 @@ export async function hydrate(): Promise<Snapshot> {
       kind: string;
       text: string;
       tool_uses_json: string | null;
+      tool_name: string | null;
       x: number;
       y: number;
     }[]
   >(
-    `SELECT id, branch_id, kind, text, tool_uses_json, x, y
+    `SELECT id, branch_id, kind, text, tool_uses_json, tool_name, x, y
        FROM nodes WHERE workspace_id = $1 ORDER BY created_at ASC`,
     [DEFAULT_WORKSPACE_ID],
   );
@@ -125,6 +145,7 @@ export async function hydrate(): Promise<Snapshot> {
     position: { x: r.x, y: r.y },
     text: r.text,
     toolUses: r.tool_uses_json ? JSON.parse(r.tool_uses_json) : undefined,
+    toolName: r.tool_name ?? undefined,
   }));
 
   const spawns: SpawnRecord[] = spawnRows.map((r) => ({
@@ -205,9 +226,9 @@ export async function persistNode(node: CanvasNode): Promise<void> {
   const db = await getDb();
   await db.execute(
     `INSERT OR REPLACE INTO nodes
-      (id, workspace_id, branch_id, kind, text, tool_uses_json, raw_json, x, y, created_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
-       COALESCE((SELECT created_at FROM nodes WHERE id = $1), $10))`,
+      (id, workspace_id, branch_id, kind, text, tool_uses_json, tool_name, raw_json, x, y, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+       COALESCE((SELECT created_at FROM nodes WHERE id = $1), $11))`,
     [
       node.id,
       DEFAULT_WORKSPACE_ID,
@@ -215,6 +236,7 @@ export async function persistNode(node: CanvasNode): Promise<void> {
       node.kind,
       node.text,
       node.toolUses ? JSON.stringify(node.toolUses) : null,
+      node.toolName ?? null,
       null,
       node.position.x,
       node.position.y,

@@ -19,10 +19,17 @@ pub fn run() {
             sql: include_str!("../migrations/0002_cross_edges.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 3,
+            description: "tool_name",
+            sql: include_str!("../migrations/0003_tool_name.sql"),
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri_plugin_sql::Builder::default()
                 .add_migrations("sqlite:canvas.db", migrations)

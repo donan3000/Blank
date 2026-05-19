@@ -9,6 +9,7 @@ import { BranchIndicator } from "./components/BranchIndicator";
 import { CostMeter } from "./components/CostMeter";
 import { CrossEdgeModal } from "./components/CrossEdgeModal";
 import { NewIslandButton } from "./components/NewIslandButton";
+import { CwdButton } from "./components/CwdButton";
 
 interface ContextMenuState {
   nodeId: string;
@@ -102,6 +103,7 @@ export default function App() {
 
         <div className="pointer-events-none absolute left-4 top-4 flex flex-col items-start gap-2">
           <NewIslandButton />
+          <CwdButton />
         </div>
 
         <div className="pointer-events-none absolute right-4 top-4 flex flex-col items-end gap-2">

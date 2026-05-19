@@ -131,6 +131,7 @@ fn build_args(opts: &SpawnOpts) -> Vec<String> {
     args.push("--output-format".into());
     args.push("stream-json".into());
     args.push("--verbose".into());
+    args.push("--include-partial-messages".into());
 
     if !opts.allowed_tools.is_empty() {
         args.push("--allowed-tools".into());

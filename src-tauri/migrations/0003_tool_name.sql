@@ -1,0 +1,1 @@
+ALTER TABLE nodes ADD COLUMN tool_name TEXT;

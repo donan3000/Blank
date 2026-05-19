@@ -4,11 +4,13 @@ import { cancelClaude, spawnClaude, subscribeEvents } from "../bridge/claude";
 import type { ClaudeStreamEvent } from "../bridge/events";
 import {
   hydrate as hydrateDb,
+  loadWorkspaceCwd,
   persistBranch,
   persistCrossEdge,
   persistIsland,
   persistNode,
   persistSpawn,
+  updateWorkspaceCwd,
   wipeWorkspace,
 } from "../bridge/db";
 
@@ -33,6 +35,7 @@ export interface CanvasNode {
   position: { x: number; y: number };
   text: string;
   toolUses?: { id: string; name: string; input: unknown }[];
+  toolName?: string;
   raw?: unknown;
 }
 
@@ -76,10 +79,12 @@ interface State {
   hydrated: boolean;
   costByIsland: Record<string, number>;
   wiringFrom: string | null;
+  streamingByBranch: Record<string, string>;
   unlistens: Map<string, UnlistenFn>;
   spawns: Map<string, string>;
 
   hydrate: () => Promise<void>;
+  setCwd: (cwd: string) => Promise<void>;
   submit: (prompt: string, branchId?: string) => Promise<void>;
   branchSameAgent: (fromNodeId: string) => void;
   branchNewIsland: (fromNodeId: string, persona?: string) => void;
@@ -129,10 +134,14 @@ function extractAssistant(message: unknown): {
   return { text: text.join("\n\n"), toolUses };
 }
 
-function extractToolResult(message: unknown): string {
+function extractToolResult(message: unknown): { text: string; toolUseId?: string } {
   const parts: string[] = [];
+  let toolUseId: string | undefined;
   for (const b of blocksOf(message)) {
     if (b.type !== "tool_result") continue;
+    if (!toolUseId) {
+      toolUseId = (b as { tool_use_id?: string }).tool_use_id;
+    }
     if (typeof b.content === "string") parts.push(b.content);
     else if (Array.isArray(b.content)) {
       for (const c of b.content as MessageBlock[]) {
@@ -140,7 +149,23 @@ function extractToolResult(message: unknown): string {
       }
     }
   }
-  return parts.join("\n");
+  return { text: parts.join("\n"), toolUseId };
+}
+
+function lookupToolName(
+  nodes: CanvasNode[],
+  branchId: string,
+  toolUseId: string | undefined,
+): string | undefined {
+  if (!toolUseId) return undefined;
+  for (let i = nodes.length - 1; i >= 0; i--) {
+    const n = nodes[i];
+    if (n.branchId !== branchId) continue;
+    if (!n.toolUses) continue;
+    const hit = n.toolUses.find((t) => t.id === toolUseId);
+    if (hit) return hit.name;
+  }
+  return undefined;
 }
 
 let idSeed = 0;
@@ -197,11 +222,13 @@ export const useWorkspace = create<State>((set, get) => ({
   hydrated: false,
   costByIsland: {},
   wiringFrom: null,
+  streamingByBranch: {},
   unlistens: new Map(),
   spawns: new Map(),
 
   hydrate: async () => {
     try {
+      const cwd = await loadWorkspaceCwd();
       const snap = await hydrateDb();
       if (snap.branches.length > 0) {
         const cost: Record<string, number> = {};
@@ -221,13 +248,14 @@ export const useWorkspace = create<State>((set, get) => ({
           crossEdges: snap.crossEdges,
           activeBranchId,
           costByIsland: cost,
+          cwd,
           hydrated: true,
         });
       } else {
         const { islands, branches } = get();
         for (const island of islands) await persistIsland(island);
         for (const branch of branches) await persistBranch(branch);
-        set({ hydrated: true });
+        set({ cwd, hydrated: true });
       }
     } catch (err) {
       set({
@@ -235,6 +263,15 @@ export const useWorkspace = create<State>((set, get) => ({
         hydrated: true,
       });
     }
+  },
+
+  setCwd: async (cwd: string) => {
+    set({ cwd });
+    await updateWorkspaceCwd(cwd).catch((err) => {
+      set({
+        error: `cwd persist failed: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    });
   },
 
   submit: async (prompt: string, branchId?: string) => {
@@ -318,30 +355,90 @@ export const useWorkspace = create<State>((set, get) => ({
             return;
           }
 
-          if (e.type === "assistant") {
-            const { text, toolUses } = extractAssistant(e.message);
-            if (!text && toolUses.length === 0) return;
-            let added: CanvasNode | undefined;
+          if (e.type === "stream_event") {
+            const inner = e.event as {
+              type?: string;
+              delta?: { type?: string; text?: string };
+            };
+            if (inner.type !== "content_block_delta") return;
+            if (inner.delta?.type !== "text_delta") return;
+            const deltaText = inner.delta.text ?? "";
+            if (!deltaText) return;
             set((s) => {
+              const existingId = s.streamingByBranch[branch.id];
+              if (existingId) {
+                return {
+                  nodes: s.nodes.map((n) =>
+                    n.id === existingId ? { ...n, text: n.text + deltaText } : n,
+                  ),
+                };
+              }
               const b = s.branches.find((x) => x.id === branch.id);
               if (!b) return s;
-              added = {
+              const newNode: CanvasNode = {
                 id: mkId("assistant"),
                 kind: "assistant",
                 branchId: branch.id,
                 position: { x: b.xOrigin, y: branchTailY(b, s.nodes) },
-                text,
-                toolUses,
-                raw: e.message,
+                text: deltaText,
               };
-              return { nodes: [...s.nodes, added] };
+              return {
+                nodes: [...s.nodes, newNode],
+                streamingByBranch: {
+                  ...s.streamingByBranch,
+                  [branch.id]: newNode.id,
+                },
+              };
             });
-            if (added) persistNode(added).catch(console.error);
+            return;
+          }
+
+          if (e.type === "assistant") {
+            const { text, toolUses } = extractAssistant(e.message);
+            if (!text && toolUses.length === 0) return;
+            const streamingId = get().streamingByBranch[branch.id];
+            let finalNodeId: string | undefined;
+            if (streamingId) {
+              set((s) => {
+                const rest = { ...s.streamingByBranch };
+                delete rest[branch.id];
+                return {
+                  nodes: s.nodes.map((n) =>
+                    n.id === streamingId
+                      ? { ...n, text, toolUses, raw: e.message }
+                      : n,
+                  ),
+                  streamingByBranch: rest,
+                };
+              });
+              finalNodeId = streamingId;
+            } else {
+              let added: CanvasNode | undefined;
+              set((s) => {
+                const b = s.branches.find((x) => x.id === branch.id);
+                if (!b) return s;
+                added = {
+                  id: mkId("assistant"),
+                  kind: "assistant",
+                  branchId: branch.id,
+                  position: { x: b.xOrigin, y: branchTailY(b, s.nodes) },
+                  text,
+                  toolUses,
+                  raw: e.message,
+                };
+                return { nodes: [...s.nodes, added] };
+              });
+              finalNodeId = added?.id;
+            }
+            const finalized = finalNodeId
+              ? get().nodes.find((n) => n.id === finalNodeId)
+              : undefined;
+            if (finalized) persistNode(finalized).catch(console.error);
             return;
           }
 
           if (e.type === "user") {
-            const text = extractToolResult(e.message);
+            const { text, toolUseId } = extractToolResult(e.message);
             if (!text) return;
             let added: CanvasNode | undefined;
             set((s) => {
@@ -353,6 +450,7 @@ export const useWorkspace = create<State>((set, get) => ({
                 branchId: branch.id,
                 position: { x: b.xOrigin, y: branchTailY(b, s.nodes) },
                 text,
+                toolName: lookupToolName(s.nodes, branch.id, toolUseId),
                 raw: e.message,
               };
               return { nodes: [...s.nodes, added] };
@@ -387,11 +485,21 @@ export const useWorkspace = create<State>((set, get) => ({
           }
         },
         () => {
-          set((s) => ({
-            branches: s.branches.map((b) =>
-              b.id === branch.id ? { ...b, busy: false } : b,
-            ),
-          }));
+          const orphan = get().streamingByBranch[branch.id];
+          set((s) => {
+            const rest = { ...s.streamingByBranch };
+            delete rest[branch.id];
+            return {
+              branches: s.branches.map((b) =>
+                b.id === branch.id ? { ...b, busy: false } : b,
+              ),
+              streamingByBranch: rest,
+            };
+          });
+          if (orphan) {
+            const node = get().nodes.find((n) => n.id === orphan);
+            if (node) persistNode(node).catch(console.error);
+          }
           get().spawns.delete(branch.id);
         },
       );

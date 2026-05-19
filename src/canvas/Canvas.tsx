@@ -35,6 +35,7 @@ function toRF(n: CanvasNode, activeBranchId: string, wiringFrom: string | null):
     data: {
       text: n.text,
       toolUses: n.toolUses,
+      toolName: n.toolName,
       dimmed: n.branchId !== activeBranchId,
       wiring: n.id === wiringFrom,
     },
